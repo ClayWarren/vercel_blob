@@ -1,6 +1,8 @@
 package vercelblob
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,16 +17,16 @@ import (
 const (
 	BlobAPIVersion = "9"
 	DefaultBaseURL = "https://blob.vercel-storage.com"
+	// MultipartThreshold is the minimum size for multipart uploads (5MB)
+	MultipartThreshold = 5 * 1024 * 1024
 )
 
 // Client is a client for the Vercel Blob Storage API.
 type Client struct {
-	// A token provider to use to obtain a token to authenticate with the API
 	tokenProvider TokenProvider
-	// The server URL to use.  This is not normally needed but can be used for testing purposes.
-	baseURL string
-	// The API version of the client
-	apiVersion string
+	baseURL       string
+	apiVersion    string
+	httpClient    *http.Client
 }
 
 // BlobAPIErrorDetail contains details about a blob API error.
@@ -39,21 +41,21 @@ type BlobAPIError struct {
 }
 
 // NewClient creates a new client for use inside a Vercel function.
-// It automatically picks up the baseURL and apiVersion from environment variables if present.
 func NewClient() *Client {
 	return &Client{
 		baseURL:    getEnv("VERCEL_BLOB_API_URL", getEnv("NEXT_PUBLIC_VERCEL_BLOB_API_URL", DefaultBaseURL)),
 		apiVersion: getEnv("VERCEL_BLOB_API_VERSION", BlobAPIVersion),
+		httpClient: &http.Client{},
 	}
 }
 
 // NewClientExternal creates a new client for use outside of Vercel.
-// It requires a tokenProvider and picks up baseURL and apiVersion from environment variables if present.
 func NewClientExternal(tokenProvider TokenProvider) *Client {
 	return &Client{
 		tokenProvider: tokenProvider,
 		baseURL:       getEnv("VERCEL_BLOB_API_URL", getEnv("NEXT_PUBLIC_VERCEL_BLOB_API_URL", DefaultBaseURL)),
 		apiVersion:    getEnv("VERCEL_BLOB_API_VERSION", BlobAPIVersion),
+		httpClient:    &http.Client{},
 	}
 }
 
@@ -117,55 +119,55 @@ func (c *Client) handleError(resp *http.Response) error {
 	}
 }
 
-// ListBlobResultBlob is details about a blob that are returned by the list operation
+// ListBlobResultBlob is details about a blob that are returned by the list operation.
 type ListBlobResultBlob struct {
-	// The URL to download the blob
-	URL string `json:"url"`
-	// The pathname of the blob
-	PathName string `json:"pathname"`
-	// The size of the blob in bytes
-	Size uint64 `json:"size"`
-	// The time the blob was uploaded
+	URL        string    `json:"url"`
+	PathName   string    `json:"pathname"`
+	Size       uint64    `json:"size"`
 	UploadedAt time.Time `json:"uploadedAt"`
 }
 
-// ListBlobResult is the response from the list operation
+// ListBlobResult is the response from the list operation.
 type ListBlobResult struct {
-	// A list of blobs found by the operation
-	Blobs []ListBlobResultBlob `json:"blobs"`
-	// A cursor that can be used to page results
-	Cursor string `json:"cursor"`
-	// True if there are more results available
-	HasMore bool `json:"hasMore"`
+	Blobs   []ListBlobResultBlob `json:"blobs"`
+	Folders []string             `json:"folders,omitempty"`
+	Cursor  string               `json:"cursor"`
+	HasMore bool                 `json:"hasMore"`
 }
 
-// ListCommandOptions is options for the list operation
-//
-// The limit option can be used to limit the number of results returned.
-// If the limit is reached then response will have has_more set to true
-// and the cursor can be used to get the next page of results.
+// ListCommandOptions is options for the list operation.
 type ListCommandOptions struct {
-	// The maximum number of results to return
-	Limit uint64
-	// A prefix to filter results
+	Limit  uint64
 	Prefix string
-	// A cursor (returned from a previous list call) used to page results
 	Cursor string
+	Mode   string
 }
 
-// PutCommandOptions is options for the put operation
-//
-// By default uploaded files are assigned a URL with a random suffix.  This
-// ensures that no put operation will overwrite an existing file.  The url
-// returned in the response can be used to later download the file.
-//
-// If predictable URLs are needed then add_random_suffix can be set to false
-// to disable this behavior.  If dsiabled then sequential writes to the same
-// pathname will overwrite each other.
+// PutCommandOptions is options for the put operation.
 type PutCommandOptions struct {
 	AddRandomSuffix    bool
 	CacheControlMaxAge uint64
 	ContentType        string
+	Access             string
+}
+
+// PutBlobPutResult is the response from the put operation.
+type PutBlobPutResult struct {
+	URL                string `json:"url"`
+	Pathname           string `json:"pathname"`
+	ContentType        string `json:"contentType"`
+	ContentDisposition string `json:"contentDisposition"`
+}
+
+// HeadBlobResult is response from the head operation.
+type HeadBlobResult struct {
+	URL                string    `json:"url"`
+	Size               uint64    `json:"size"`
+	UploadedAt         time.Time `json:"uploadedAt"`
+	Pathname           string    `json:"pathname"`
+	ContentType        string    `json:"contentType"`
+	ContentDisposition string    `json:"contentDisposition"`
+	CacheControl       string    `json:"cacheControl"`
 }
 
 // Range represents a byte range for download operations.
@@ -174,57 +176,33 @@ type Range struct {
 	End   uint
 }
 
-// DownloadCommandOptions is options for the download operation
+// DownloadCommandOptions is options for the download operation.
 type DownloadCommandOptions struct {
-	// The range of bytes to download.  If not specified then the entire blob
-	// is downloaded.  The start of the range must be less than the # of bytes
-	// in the blob or an error will be returned.  The end of the range may be
-	// greater than the number of bytes in the blob.
+	// The range of bytes to download.
 	ByteRange *Range
 }
 
-// PutBlobPutResult is the response from the put operation
-type PutBlobPutResult struct {
-	// The URL to download the blob
-	URL string `json:"url"`
-	// The pathname of the blob
-	Pathname string `json:"pathname"`
-	// The content type of the blob
-	ContentType string `json:"contentType"`
-	// The content disposition of the blob
-	ContentDisposition string `json:"contentDisposition"`
+// Multipart types
+type createMultipartUploadResponse struct {
+	UploadID string `json:"uploadId"`
+	Key      string `json:"key"`
 }
 
-// HeadBlobResult is response from the head operation
-type HeadBlobResult struct {
-	// The URL to download the blob
-	URL string `json:"url"`
-	// The size of the blob in bytes
-	Size uint64 `json:"size"`
-	// The time the blob was uploaded
-	UploadedAt time.Time `json:"uploadedAt"`
-	// The pathname of the blob
-	Pathname string `json:"pathname"`
-	// The content type of the blob
-	ContentType string `json:"contentType"`
-	// The content disposition of the blob
-	ContentDisposition string `json:"contentDisposition"`
-	// The cache settings for the blob
-	CacheControl string `json:"cacheControl"`
+// Part represents a part of a multipart upload.
+type Part struct {
+	ETag       string `json:"etag"`
+	PartNumber int    `json:"partNumber"`
 }
 
-// List files in the blob store
-//
-// # Arguments
-//
-//   - `options` - Options for the list operation
-//
-// # Returns
-//
-// The response from the list operation
-func (c *Client) List(options ListCommandOptions) (*ListBlobResult, error) {
+type completeMultipartUploadRequest struct {
+	UploadID string `json:"uploadId"`
+	Key      string `json:"key"`
+	Parts    []Part `json:"parts"`
+}
 
-	req, err := http.NewRequest(http.MethodGet, c.baseURL, nil)
+// List files in the blob store.
+func (c *Client) List(ctx context.Context, options ListCommandOptions) (*ListBlobResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -239,6 +217,9 @@ func (c *Client) List(options ListCommandOptions) (*ListBlobResult, error) {
 	if options.Cursor != "" {
 		q.Add("cursor", options.Cursor)
 	}
+	if options.Mode != "" {
+		q.Add("mode", options.Mode)
+	}
 	req.URL.RawQuery = q.Encode()
 
 	c.addAPIVersionHeader(req)
@@ -247,8 +228,7 @@ func (c *Client) List(options ListCommandOptions) (*ListBlobResult, error) {
 		return nil, err
 	}
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -266,27 +246,28 @@ func (c *Client) List(options ListCommandOptions) (*ListBlobResult, error) {
 	return &result, nil
 }
 
-// Put uploads a file to the blob store
-//
-// # Arguments
-//
-//   - `pathname` - The destination pathname for the uploaded file
-//   - `body` - The contents of the file
-//   - `options` - Options for the put operation
-//
-// # Returns
-//
-// The response from the put operation.  This includes a URL that can
-// be used to later download the blob.
-func (c *Client) Put(pathname string, body io.Reader, options PutCommandOptions) (*PutBlobPutResult, error) {
-
+// Put uploads a file to the blob store.
+func (c *Client) Put(ctx context.Context, pathname string, body io.Reader, options PutCommandOptions) (*PutBlobPutResult, error) {
 	if len(pathname) == 0 {
 		return nil, NewInvalidInputError("pathname")
 	}
 
-	apiURL := c.getAPIURL(pathname)
+	// Determine if we should use multipart
+	var size int64 = -1
+	if sizer, ok := body.(interface{ Size() int64 }); ok {
+		size = sizer.Size()
+	} else if seeker, ok := body.(io.Seeker); ok {
+		curr, _ := seeker.Seek(0, io.SeekCurrent)
+		size, _ = seeker.Seek(0, io.SeekEnd)
+		_, _ = seeker.Seek(curr, io.SeekStart)
+	}
 
-	req, err := http.NewRequest(http.MethodPut, apiURL, body)
+	if size > MultipartThreshold {
+		return c.putMultipart(ctx, pathname, body, options)
+	}
+
+	apiURL := c.getAPIURL(pathname)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, apiURL, body)
 	if err != nil {
 		return nil, err
 	}
@@ -297,18 +278,9 @@ func (c *Client) Put(pathname string, body io.Reader, options PutCommandOptions)
 		return nil, err
 	}
 
-	if !options.AddRandomSuffix {
-		req.Header.Set("X-Add-Random-Suffix", "0")
-	}
-	if options.ContentType != "" {
-		req.Header.Set("X-Content-Type", options.ContentType)
-	}
-	if options.CacheControlMaxAge > 0 {
-		req.Header.Set("X-Cache-Control-Max-Age", strconv.FormatUint(options.CacheControlMaxAge, 10))
-	}
+	c.setPutHeaders(req, options)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -326,34 +298,121 @@ func (c *Client) Put(pathname string, body io.Reader, options PutCommandOptions)
 	return &result, nil
 }
 
-// Head gets the metadata for a file in the blob store
-//
-// # Arguments
-//
-//   - `pathname` - The URL of the file to get metadata for.  This should be the same URL that is used
-//     to download the file.
-//   - `options` - Options for the head operation
-//
-// # Returns
-//
-// If the file exists then the metadata for the file is returned.  If the file does not exist
-// then None is returned.
-func (c *Client) Head(pathname string) (*HeadBlobResult, error) {
+func (c *Client) setPutHeaders(req *http.Request, options PutCommandOptions) {
+	if !options.AddRandomSuffix {
+		req.Header.Set("X-Add-Random-Suffix", "0")
+	}
+	if options.ContentType != "" {
+		req.Header.Set("X-Content-Type", options.ContentType)
+	}
+	if options.CacheControlMaxAge > 0 {
+		req.Header.Set("X-Cache-Control-Max-Age", strconv.FormatUint(options.CacheControlMaxAge, 10))
+	}
+	access := options.Access
+	if access == "" {
+		access = "public"
+	}
+	req.Header.Set("X-Access", access)
+}
 
-	apiURL := c.getAPIURL(pathname)
-
-	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+func (c *Client) putMultipart(ctx context.Context, pathname string, body io.Reader, options PutCommandOptions) (*PutBlobPutResult, error) {
+	// 1. Create Multipart Upload
+	apiURL := c.getAPIURL("/mpu")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	c.addAPIVersionHeader(req)
-	err = c.addAuthorizationHeader(req, "put", pathname)
+	_ = c.addAuthorizationHeader(req, "put", pathname)
+	c.setPutHeaders(req, options)
+	req.Header.Set("X-MPU-Action", "create")
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.handleError(resp)
+	}
+	var createResp createMultipartUploadResponse
+	_ = json.NewDecoder(resp.Body).Decode(&createResp)
+	_ = resp.Body.Close()
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	// 2. Upload Parts
+	var parts []Part
+	partNumber := 1
+	buffer := make([]byte, MultipartThreshold)
+	for {
+		n, err := io.ReadFull(body, buffer)
+		if n > 0 {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPut, apiURL, bytes.NewReader(buffer[:n]))
+			if err != nil {
+				return nil, err
+			}
+			c.addAPIVersionHeader(req)
+			_ = c.addAuthorizationHeader(req, "put", pathname)
+			req.Header.Set("X-MPU-Action", "upload")
+			req.Header.Set("X-MPU-Upload-Id", createResp.UploadID)
+			req.Header.Set("X-MPU-Key", createResp.Key)
+			req.Header.Set("X-MPU-Part-Number", strconv.Itoa(partNumber))
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				return nil, err
+			}
+			if resp.StatusCode != http.StatusOK {
+				return nil, c.handleError(resp)
+			}
+			etag := resp.Header.Get("ETag")
+			_ = resp.Body.Close()
+
+			parts = append(parts, Part{ETag: etag, PartNumber: partNumber})
+			partNumber++
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// 3. Complete
+	completeReq, _ := json.Marshal(completeMultipartUploadRequest{
+		UploadID: createResp.UploadID,
+		Key:      createResp.Key,
+		Parts:    parts,
+	})
+	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(completeReq))
+	c.addAPIVersionHeader(req)
+	_ = c.addAuthorizationHeader(req, "put", pathname)
+	req.Header.Set("X-MPU-Action", "complete")
+
+	resp, err = c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.handleError(resp)
+	}
+
+	var result PutBlobPutResult
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	return &result, nil
+}
+
+// Head gets the metadata for a file in the blob store.
+func (c *Client) Head(ctx context.Context, pathname string) (*HeadBlobResult, error) {
+	apiURL := c.getAPIURL(pathname)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.addAPIVersionHeader(req)
+	_ = c.addAuthorizationHeader(req, "put", pathname)
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -373,160 +432,81 @@ func (c *Client) Head(pathname string) (*HeadBlobResult, error) {
 	return &result, nil
 }
 
-// Delete a blob from the blob store
-//
-// # Arguments
-//
-//   - `urlPath` - The URL of the file to delete.  This should be the same URL that is used
-//     to download the file.
-//   - `options` - Options for the del operation
-//
-// # Returns
-//
-// None
-func (c *Client) Delete(urlPath string) error {
+type deleteRequest struct {
+	URLs []string `json:"urls"`
+}
 
+// Delete blobs from the blob store.
+func (c *Client) Delete(ctx context.Context, urls ...string) error {
+	if len(urls) == 0 {
+		return nil
+	}
 	apiURL := c.getAPIURL("/delete")
-
-	req, err := http.NewRequest(http.MethodPost, apiURL, nil)
-	if err != nil {
-		return err
-	}
-
+	reqBody, _ := json.Marshal(deleteRequest{URLs: urls})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
 	c.addAPIVersionHeader(req)
-	err = c.addAuthorizationHeader(req, "delete", urlPath)
-	if err != nil {
-		return err
-	}
+	_ = c.addAuthorizationHeader(req, "delete", urls[0])
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-
 	if resp.StatusCode != http.StatusOK {
 		return c.handleError(resp)
 	}
-
 	return nil
 }
 
-// Copy copies the file at the given `fromUrl` to the path `toPath`.
-//
-// # Arguments
-//
-//   - `fromUrl` - Must be a valid URL of the existed file
-//   - `toPath` - The destination pathname
-//   - `options` - Options for the put operation
-//
-// # Returns
-//
-// The response from the put operation.  This includes a URL that can
-// be used to later download the blob.
-func (c *Client) Copy(fromURL, toPath string, options PutCommandOptions) (*PutBlobPutResult, error) {
+// Copy copies an existing blob object to a new path within the blob store.
+func (c *Client) Copy(ctx context.Context, fromURL, toPath string, options PutCommandOptions) (*PutBlobPutResult, error) {
 	if len(fromURL) == 0 {
 		return nil, NewInvalidInputError("fromURL")
 	}
-
 	if len(toPath) == 0 {
 		return nil, NewInvalidInputError("toPath")
 	}
-
 	apiURL := c.getAPIURL(toPath)
-
-	req, err := http.NewRequest(http.MethodPut, apiURL, nil)
-	if err != nil {
-		return nil, err
-	}
-
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, apiURL, nil)
 	q := req.URL.Query()
 	q.Add("fromUrl", fromURL)
 	req.URL.RawQuery = q.Encode()
 
 	c.addAPIVersionHeader(req)
-	err = c.addAuthorizationHeader(req, "put", toPath)
-	if err != nil {
-		return nil, err
-	}
+	_ = c.addAuthorizationHeader(req, "put", toPath)
+	c.setPutHeaders(req, options)
 
-	if !options.AddRandomSuffix {
-		req.Header.Set("X-Add-Random-Suffix", "0")
-	}
-	if options.ContentType != "" {
-		req.Header.Set("X-Content-Type", options.ContentType)
-	}
-	if options.CacheControlMaxAge > 0 {
-		req.Header.Set("X-Cache-Control-Max-Age", strconv.FormatUint(options.CacheControlMaxAge, 10))
-	}
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.handleError(resp)
 	}
-
 	var result PutBlobPutResult
-	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 	return &result, nil
 }
 
-// Download a blob from the blob store
-//
-// # Arguments
-//
-//   - `urlPath` - The URL of the file to download.
-//   - `options` - Options for the download operation
-//
-// # Returns
-//
-// The contents of the file
-func (c *Client) Download(urlPath string, options DownloadCommandOptions) ([]byte, error) {
-
-	req, err := http.NewRequest(http.MethodGet, urlPath, nil)
-	if err != nil {
-		return nil, err
-	}
-
+// Download a blob from the blob store.
+func (c *Client) Download(ctx context.Context, urlPath string, options DownloadCommandOptions) ([]byte, error) {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, urlPath, nil)
 	c.addAPIVersionHeader(req)
-	err = c.addAuthorizationHeader(req, "download", urlPath)
-	if err != nil {
-		return nil, err
-	}
+	_ = c.addAuthorizationHeader(req, "download", urlPath)
 
 	if options.ByteRange != nil {
-		start := options.ByteRange.Start
-		end := options.ByteRange.End
-		if start == end {
-			return []byte{}, nil
-		}
-		req.Header.Set("range", fmt.Sprintf("bytes=%d-%d", start, end))
+		req.Header.Set("range", fmt.Sprintf("bytes=%d-%d", options.ByteRange.Start, options.ByteRange.End))
 	}
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return nil, c.handleError(resp)
 	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	return body, nil
+	return io.ReadAll(resp.Body)
 }

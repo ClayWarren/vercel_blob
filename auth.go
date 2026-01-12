@@ -2,8 +2,44 @@
 package vercelblob
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
+	"time"
 )
+
+// ... (existing code)
+
+// ClientTokenOptions is options for generating a client token.
+type ClientTokenOptions struct {
+	// The operation to allow: "put", "delete", "list"
+	Operation string `json:"operation"`
+	// The pathname or URL to allow.
+	Pathname string `json:"pathname,omitempty"`
+	// The expiration time for the token.
+	ExpiresAt int64 `json:"expiresAt,omitempty"`
+}
+
+// GenerateClientToken generates a token that can be used by a client (e.g. browser)
+// to perform an operation on the blob store.
+func GenerateClientToken(token string, options ClientTokenOptions) (string, error) {
+	if options.ExpiresAt == 0 {
+		options.ExpiresAt = time.Now().Add(time.Hour).Unix()
+	}
+
+	payload, err := json.Marshal(options)
+	if err != nil {
+		return "", err
+	}
+
+	h := hmac.New(sha256.New, []byte(token))
+	h.Write(payload)
+	signature := hex.EncodeToString(h.Sum(nil))
+
+	return hex.EncodeToString(payload) + "." + signature, nil
+}
 
 // TokenProvider is a trait for providing a token to authenticate with the Vercel Blob Storage API.
 //
