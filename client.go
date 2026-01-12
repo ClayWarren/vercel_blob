@@ -10,15 +10,12 @@ import (
 	"net/url"
 	"os"
 	"strconv"
-	"time"
 )
 
 // BlobAPIVersion is the version of the Vercel Blob API.
 const (
 	BlobAPIVersion = "9"
 	DefaultBaseURL = "https://blob.vercel-storage.com"
-	// MultipartThreshold is the minimum size for multipart uploads (5MB)
-	MultipartThreshold = 5 * 1024 * 1024
 )
 
 // Client is a client for the Vercel Blob Storage API.
@@ -117,87 +114,6 @@ func (c *Client) handleError(resp *http.Response) error {
 	default:
 		return NewUnknownError(resp.StatusCode, errResp.Error.Message)
 	}
-}
-
-// ListBlobResultBlob is details about a blob that are returned by the list operation.
-type ListBlobResultBlob struct {
-	URL        string    `json:"url"`
-	PathName   string    `json:"pathname"`
-	Size       uint64    `json:"size"`
-	UploadedAt time.Time `json:"uploadedAt"`
-}
-
-// ListBlobResult is the response from the list operation.
-type ListBlobResult struct {
-	Blobs   []ListBlobResultBlob `json:"blobs"`
-	Folders []string             `json:"folders,omitempty"`
-	Cursor  string               `json:"cursor"`
-	HasMore bool                 `json:"hasMore"`
-}
-
-// ListCommandOptions is options for the list operation.
-type ListCommandOptions struct {
-	Limit  uint64
-	Prefix string
-	Cursor string
-	Mode   string
-}
-
-// PutCommandOptions is options for the put operation.
-type PutCommandOptions struct {
-	AddRandomSuffix    bool
-	CacheControlMaxAge uint64
-	ContentType        string
-	Access             string
-}
-
-// PutBlobPutResult is the response from the put operation.
-type PutBlobPutResult struct {
-	URL                string `json:"url"`
-	Pathname           string `json:"pathname"`
-	ContentType        string `json:"contentType"`
-	ContentDisposition string `json:"contentDisposition"`
-}
-
-// HeadBlobResult is response from the head operation.
-type HeadBlobResult struct {
-	URL                string    `json:"url"`
-	Size               uint64    `json:"size"`
-	UploadedAt         time.Time `json:"uploadedAt"`
-	Pathname           string    `json:"pathname"`
-	ContentType        string    `json:"contentType"`
-	ContentDisposition string    `json:"contentDisposition"`
-	CacheControl       string    `json:"cacheControl"`
-}
-
-// Range represents a byte range for download operations.
-type Range struct {
-	Start uint
-	End   uint
-}
-
-// DownloadCommandOptions is options for the download operation.
-type DownloadCommandOptions struct {
-	// The range of bytes to download.
-	ByteRange *Range
-}
-
-// Multipart types
-type createMultipartUploadResponse struct {
-	UploadID string `json:"uploadId"`
-	Key      string `json:"key"`
-}
-
-// Part represents a part of a multipart upload.
-type Part struct {
-	ETag       string `json:"etag"`
-	PartNumber int    `json:"partNumber"`
-}
-
-type completeMultipartUploadRequest struct {
-	UploadID string `json:"uploadId"`
-	Key      string `json:"key"`
-	Parts    []Part `json:"parts"`
 }
 
 // List files in the blob store.
@@ -313,93 +229,6 @@ func (c *Client) setPutHeaders(req *http.Request, options PutCommandOptions) {
 		access = "public"
 	}
 	req.Header.Set("X-Access", access)
-}
-
-func (c *Client) putMultipart(ctx context.Context, pathname string, body io.Reader, options PutCommandOptions) (*PutBlobPutResult, error) {
-	// 1. Create Multipart Upload
-	apiURL := c.getAPIURL("/mpu")
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	c.addAPIVersionHeader(req)
-	_ = c.addAuthorizationHeader(req, "put", pathname)
-	c.setPutHeaders(req, options)
-	req.Header.Set("X-MPU-Action", "create")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.handleError(resp)
-	}
-	var createResp createMultipartUploadResponse
-	_ = json.NewDecoder(resp.Body).Decode(&createResp)
-	_ = resp.Body.Close()
-
-	// 2. Upload Parts
-	var parts []Part
-	partNumber := 1
-	buffer := make([]byte, MultipartThreshold)
-	for {
-		n, err := io.ReadFull(body, buffer)
-		if n > 0 {
-			req, err := http.NewRequestWithContext(ctx, http.MethodPut, apiURL, bytes.NewReader(buffer[:n]))
-			if err != nil {
-				return nil, err
-			}
-			c.addAPIVersionHeader(req)
-			_ = c.addAuthorizationHeader(req, "put", pathname)
-			req.Header.Set("X-MPU-Action", "upload")
-			req.Header.Set("X-MPU-Upload-Id", createResp.UploadID)
-			req.Header.Set("X-MPU-Key", createResp.Key)
-			req.Header.Set("X-MPU-Part-Number", strconv.Itoa(partNumber))
-
-			resp, err := c.httpClient.Do(req)
-			if err != nil {
-				return nil, err
-			}
-			if resp.StatusCode != http.StatusOK {
-				return nil, c.handleError(resp)
-			}
-			etag := resp.Header.Get("ETag")
-			_ = resp.Body.Close()
-
-			parts = append(parts, Part{ETag: etag, PartNumber: partNumber})
-			partNumber++
-		}
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// 3. Complete
-	completeReq, _ := json.Marshal(completeMultipartUploadRequest{
-		UploadID: createResp.UploadID,
-		Key:      createResp.Key,
-		Parts:    parts,
-	})
-	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(completeReq))
-	c.addAPIVersionHeader(req)
-	_ = c.addAuthorizationHeader(req, "put", pathname)
-	req.Header.Set("X-MPU-Action", "complete")
-
-	resp, err = c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.handleError(resp)
-	}
-
-	var result PutBlobPutResult
-	_ = json.NewDecoder(resp.Body).Decode(&result)
-	return &result, nil
 }
 
 // Head gets the metadata for a file in the blob store.
