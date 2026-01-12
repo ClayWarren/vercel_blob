@@ -1,3 +1,3 @@
-module github.com/rpdg/vercel_blob
+module github.com/claywarren/vercel_blob
 
-go 1.18
+go 1.25

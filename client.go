@@ -1,4 +1,4 @@
-package vercel_blob
+package vercelblob
 
 import (
 	"encoding/json"
@@ -11,12 +11,14 @@ import (
 	"time"
 )
 
+// BlobAPIVersion is the version of the Vercel Blob API.
 const (
-	BLOB_API_VERSION = "9"
-	DEFAULT_BASE_URL = "https://blob.vercel-storage.com"
+	BlobAPIVersion = "9"
+	DefaultBaseURL = "https://blob.vercel-storage.com"
 )
 
-type VercelBlobClient struct {
+// Client is a client for the Vercel Blob Storage API.
+type Client struct {
 	// A token provider to use to obtain a token to authenticate with the API
 	tokenProvider TokenProvider
 	// The server URL to use.  This is not normally needed but can be used for testing purposes.
@@ -25,62 +27,54 @@ type VercelBlobClient struct {
 	apiVersion string
 }
 
-type BlobApiErrorDetail struct {
+// BlobAPIErrorDetail contains details about a blob API error.
+type BlobAPIErrorDetail struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
 
-type BlobApiError struct {
-	Error BlobApiErrorDetail `json:"error"`
+// BlobAPIError is the error response from the Vercel Blob API.
+type BlobAPIError struct {
+	Error BlobAPIErrorDetail `json:"error"`
 }
 
-// NewVercelBlobClient creates a new client for use inside a Vercel function
-func NewVercelBlobClient() *VercelBlobClient {
-	return &VercelBlobClient{
-		baseURL:    DEFAULT_BASE_URL,
-		apiVersion: BLOB_API_VERSION,
+// NewClient creates a new client for use inside a Vercel function.
+// It automatically picks up the baseURL and apiVersion from environment variables if present.
+func NewClient() *Client {
+	return &Client{
+		baseURL:    getEnv("VERCEL_BLOB_API_URL", getEnv("NEXT_PUBLIC_VERCEL_BLOB_API_URL", DefaultBaseURL)),
+		apiVersion: getEnv("VERCEL_BLOB_API_VERSION", BlobAPIVersion),
 	}
 }
 
-// NewVercelBlobClientExternal creates a new client for use outside of Vercel
-func NewVercelBlobClientExternal(tokenProvider TokenProvider) *VercelBlobClient {
-	return &VercelBlobClient{
+// NewClientExternal creates a new client for use outside of Vercel.
+// It requires a tokenProvider and picks up baseURL and apiVersion from environment variables if present.
+func NewClientExternal(tokenProvider TokenProvider) *Client {
+	return &Client{
 		tokenProvider: tokenProvider,
-		baseURL:       DEFAULT_BASE_URL,
-		apiVersion:    BLOB_API_VERSION,
+		baseURL:       getEnv("VERCEL_BLOB_API_URL", getEnv("NEXT_PUBLIC_VERCEL_BLOB_API_URL", DefaultBaseURL)),
+		apiVersion:    getEnv("VERCEL_BLOB_API_VERSION", BlobAPIVersion),
 	}
 }
 
-func (c *VercelBlobClient) getBaseURL() string {
-	baseURL := os.Getenv("VERCEL_BLOB_API_URL")
-	if baseURL == "" {
-		baseURL = os.Getenv("NEXT_PUBLIC_VERCEL_BLOB_API_URL")
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
 	}
-	if baseURL == "" {
-		return DEFAULT_BASE_URL
-	}
-	return baseURL
+	return fallback
 }
 
-func (c *VercelBlobClient) getAPIURL(pathname string) string {
+func (c *Client) getAPIURL(pathname string) string {
 	base, _ := url.Parse(c.baseURL)
 	base.Path = pathname
 	return base.String()
 }
 
-func (c *VercelBlobClient) getAPIVersion() string {
-	version := os.Getenv(BLOB_API_VERSION)
-	if version == "" {
-		return BLOB_API_VERSION
-	}
-	return version
-}
-
-func (c *VercelBlobClient) addAPIVersionHeader(req *http.Request) {
+func (c *Client) addAPIVersionHeader(req *http.Request) {
 	req.Header.Set("x-api-version", c.apiVersion)
 }
 
-func (c *VercelBlobClient) addAuthorizationHeader(req *http.Request, operation, pathname string) error {
+func (c *Client) addAuthorizationHeader(req *http.Request, operation, pathname string) error {
 	var token string
 	if c.tokenProvider != nil {
 		token, _ = c.tokenProvider.GetToken(operation, pathname)
@@ -96,13 +90,13 @@ func (c *VercelBlobClient) addAuthorizationHeader(req *http.Request, operation, 
 	return nil
 }
 
-func (c *VercelBlobClient) handleError(resp *http.Response) error {
+func (c *Client) handleError(resp *http.Response) error {
 	if resp.StatusCode >= 500 {
 		return NewUnknownError(resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 
-	var errResp BlobApiError
-	defer resp.Body.Close()
+	var errResp BlobAPIError
+	defer func() { _ = resp.Body.Close() }()
 	if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
 		return err
 	}
@@ -174,6 +168,7 @@ type PutCommandOptions struct {
 	ContentType        string
 }
 
+// Range represents a byte range for download operations.
 type Range struct {
 	Start uint
 	End   uint
@@ -227,7 +222,7 @@ type HeadBlobResult struct {
 // # Returns
 //
 // The response from the list operation
-func (c *VercelBlobClient) List(options ListCommandOptions) (*ListBlobResult, error) {
+func (c *Client) List(options ListCommandOptions) (*ListBlobResult, error) {
 
 	req, err := http.NewRequest(http.MethodGet, c.baseURL, nil)
 	if err != nil {
@@ -257,7 +252,7 @@ func (c *VercelBlobClient) List(options ListCommandOptions) (*ListBlobResult, er
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.handleError(resp)
@@ -283,15 +278,15 @@ func (c *VercelBlobClient) List(options ListCommandOptions) (*ListBlobResult, er
 //
 // The response from the put operation.  This includes a URL that can
 // be used to later download the blob.
-func (c *VercelBlobClient) Put(pathname string, body io.Reader, options PutCommandOptions) (*PutBlobPutResult, error) {
+func (c *Client) Put(pathname string, body io.Reader, options PutCommandOptions) (*PutBlobPutResult, error) {
 
 	if len(pathname) == 0 {
 		return nil, NewInvalidInputError("pathname")
 	}
 
-	apiUrl := c.getAPIURL(pathname)
+	apiURL := c.getAPIURL(pathname)
 
-	req, err := http.NewRequest(http.MethodPut, apiUrl, body)
+	req, err := http.NewRequest(http.MethodPut, apiURL, body)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +312,7 @@ func (c *VercelBlobClient) Put(pathname string, body io.Reader, options PutComma
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.handleError(resp)
@@ -343,11 +338,11 @@ func (c *VercelBlobClient) Put(pathname string, body io.Reader, options PutComma
 //
 // If the file exists then the metadata for the file is returned.  If the file does not exist
 // then None is returned.
-func (c *VercelBlobClient) Head(pathname string) (*HeadBlobResult, error) {
+func (c *Client) Head(pathname string) (*HeadBlobResult, error) {
 
-	apiUrl := c.getAPIURL(pathname)
+	apiURL := c.getAPIURL(pathname)
 
-	req, err := http.NewRequest(http.MethodGet, apiUrl, nil)
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +357,7 @@ func (c *VercelBlobClient) Head(pathname string) (*HeadBlobResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, ErrBlobNotFound
@@ -389,11 +384,11 @@ func (c *VercelBlobClient) Head(pathname string) (*HeadBlobResult, error) {
 // # Returns
 //
 // None
-func (c *VercelBlobClient) Delete(urlPath string) error {
+func (c *Client) Delete(urlPath string) error {
 
-	apiUrl := c.getAPIURL("/delete")
+	apiURL := c.getAPIURL("/delete")
 
-	req, err := http.NewRequest(http.MethodPost, apiUrl, nil)
+	req, err := http.NewRequest(http.MethodPost, apiURL, nil)
 	if err != nil {
 		return err
 	}
@@ -409,7 +404,7 @@ func (c *VercelBlobClient) Delete(urlPath string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return c.handleError(resp)
@@ -430,23 +425,25 @@ func (c *VercelBlobClient) Delete(urlPath string) error {
 //
 // The response from the put operation.  This includes a URL that can
 // be used to later download the blob.
-func (c *VercelBlobClient) Copy(fromUrl, toPath string, options PutCommandOptions) (*PutBlobPutResult, error) {
-	if len(fromUrl) == 0 {
-		return nil, NewInvalidInputError("fromUrl")
+func (c *Client) Copy(fromURL, toPath string, options PutCommandOptions) (*PutBlobPutResult, error) {
+	if len(fromURL) == 0 {
+		return nil, NewInvalidInputError("fromURL")
 	}
 
 	if len(toPath) == 0 {
 		return nil, NewInvalidInputError("toPath")
 	}
 
-	apiUrl := c.getAPIURL(toPath)
+	apiURL := c.getAPIURL(toPath)
 
-	req, err := http.NewRequest(http.MethodPut, apiUrl, nil)
+	req, err := http.NewRequest(http.MethodPut, apiURL, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	req.URL.Query().Add("fromUrl", fromUrl)
+	q := req.URL.Query()
+	q.Add("fromUrl", fromURL)
+	req.URL.RawQuery = q.Encode()
 
 	c.addAPIVersionHeader(req)
 	err = c.addAuthorizationHeader(req, "put", toPath)
@@ -469,7 +466,7 @@ func (c *VercelBlobClient) Copy(fromUrl, toPath string, options PutCommandOption
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.handleError(resp)
@@ -493,7 +490,7 @@ func (c *VercelBlobClient) Copy(fromUrl, toPath string, options PutCommandOption
 // # Returns
 //
 // The contents of the file
-func (c *VercelBlobClient) Download(urlPath string, options DownloadCommandOptions) ([]byte, error) {
+func (c *Client) Download(urlPath string, options DownloadCommandOptions) ([]byte, error) {
 
 	req, err := http.NewRequest(http.MethodGet, urlPath, nil)
 	if err != nil {
@@ -520,7 +517,7 @@ func (c *VercelBlobClient) Download(urlPath string, options DownloadCommandOptio
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return nil, c.handleError(resp)

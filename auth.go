@@ -1,4 +1,5 @@
-package vercel_blob
+// Package vercelblob provides a client for the Vercel Blob Storage API.
+package vercelblob
 
 import (
 	"os"
@@ -20,6 +21,7 @@ type TokenProvider interface {
 	GetToken(operation string, pathname string) (string, error)
 }
 
+// GetToken obtains a token from the provider or environment variable.
 func GetToken(provider TokenProvider, operation, pathname string) (string, error) {
 	if provider != nil {
 		return provider.GetToken(operation, pathname)
@@ -38,19 +40,19 @@ type EnvTokenProvider struct {
 	token string
 }
 
-func (p *EnvTokenProvider) GetToken(operation, pathname string) (string, error) {
+// GetToken returns the token from the provider or the BLOB_READ_WRITE_TOKEN environment variable.
+func (p *EnvTokenProvider) GetToken(_, _ string) (string, error) {
 	if p.token != "" {
 		return p.token, nil
-	} else {
-		envToken := os.Getenv("BLOB_READ_WRITE_TOKEN")
-		if envToken != "" {
-			return envToken, nil
-		} else {
-			return "", ErrNotAuthenticated
-		}
 	}
+	envToken := os.Getenv("BLOB_READ_WRITE_TOKEN")
+	if envToken != "" {
+		return envToken, nil
+	}
+	return "", ErrNotAuthenticated
 }
 
+// NewEnvTokenProvider creates a new EnvTokenProvider that reads the token from the given environment variable.
 func NewEnvTokenProvider(envVar string) (*EnvTokenProvider, error) {
 	token, exists := os.LookupEnv(envVar)
 	if !exists {

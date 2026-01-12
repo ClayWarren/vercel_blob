@@ -1,4 +1,4 @@
-package vercel_blob
+package vercelblob
 
 import (
 	"fmt"
@@ -8,20 +8,19 @@ import (
 )
 
 func Test_CountFiles(t *testing.T) {
-	client := NewVercelBlobClient()
+	client := NewClient()
 	allFiles, err := client.List(ListCommandOptions{})
 	if err != nil {
 		t.Error(err)
 		return
-	} else {
-		fmt.Println(len(allFiles.Blobs))
 	}
+	fmt.Println(len(allFiles.Blobs))
 }
 
 func Test_PutWithRandomSuffix(t *testing.T) {
-	client := NewVercelBlobClient()
+	client := NewClient()
 	f, _ := os.Open("a.png")
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	file1, err := client.Put(
 		"vercel_blob_unittest/a.png",
 		io.Reader(f),
@@ -32,27 +31,25 @@ func Test_PutWithRandomSuffix(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 		return
-	} else {
-		fmt.Println(file1.URL)
 	}
+	fmt.Println(file1.URL)
 }
 
 func Test_Copy(t *testing.T) {
 	//https://fetegzn4vw3t5yqf.public.blob.vercel-storage.com/vercel_blob_unittest/a.txt
-	client := NewVercelBlobClient()
+	client := NewClient()
 	res, err := client.Copy("https://fetegzn4vw3t5yqf.public.blob.vercel-storage.com/vercel_blob_unittest/a.txt",
 		"vercel_blob_unittest/B.txt",
 		PutCommandOptions{})
 	if err != nil {
 		t.Error(err)
 		return
-	} else {
-		fmt.Println(res.URL)
 	}
+	fmt.Println(res.URL)
 }
 
 func Test_Partial_Download(t *testing.T) {
-	client := NewVercelBlobClient()
+	client := NewClient()
 	bytes, err := client.Download("vercel_blob_unittest/a.txt",
 		DownloadCommandOptions{
 			ByteRange: &Range{0, 4},
@@ -60,7 +57,6 @@ func Test_Partial_Download(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 		return
-	} else {
-		fmt.Println(string(bytes))
 	}
+	fmt.Println(string(bytes))
 }
