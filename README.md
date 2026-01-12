@@ -1,22 +1,121 @@
 # Go Vercel Blob Client
 
-This is a Golang package that has been transcribed from [vercel_blob](https://github.com/lancedb/vercel_blob), aiming to provide similar functionality and features.
+A lightweight, idiomatic Go client for the [Vercel Blob Storage API](https://vercel.com/docs/storage/vercel-blob). Inspired by the official TypeScript SDK, it provides a simple way to interact with your Vercel Blob store from Go applications.
 
-I personally extend sincere thanks and appreciation to the original author for their Rust package, which has served as a valuable foundation. If you are interested in the original author's Rust package, please visit the following link: [https://github.com/lancedb/vercel_blob](https://github.com/lancedb/vercel_blob)
+## Installation
 
+```bash
+go get github.com/claywarren/vercel_blob
+```
 
+## Quick Start
 
-## Authentication
+### Within a Vercel Function
 
-### Within your application
+If your code is running in a Vercel Serverless or Edge function, authentication is handled automatically via the `BLOB_READ_WRITE_TOKEN` environment variable.
 
-If your golang code is part of a golang serverless function then authentication is automatic
-and provided as a part of the vercel runtime.
+```go
+import "github.com/claywarren/vercel_blob"
 
-### Outside your application
+func main() {
+    client := vercelblob.NewClient()
+    
+    // Use the client...
+}
+```
 
-If your golang code is part of a client package (running in the browser via wasm or running
-some kind of custom client application) then you will need to obtain an authentication
-token. This can be done by creating a route in your server that will supply short-lived
-authentication tokens to authorized users.  
+### Outside of Vercel (Client-side / External)
 
+For external applications, you should use a `TokenProvider` to securely fetch short-lived tokens from your backend.
+
+```go
+import "github.com/claywarren/vercel_blob"
+
+func main() {
+    // Custom provider that fetches a token from your API
+    provider := &MyTokenProvider{}
+    client := vercelblob.NewClientExternal(provider)
+    
+    // Use the client...
+}
+```
+
+## Operations
+
+### List Blobs
+
+```go
+options := vercelblob.ListCommandOptions{
+    Limit: 10,
+    Prefix: "images/",
+}
+
+result, err := client.List(options)
+if err != nil {
+    log.Fatal(err)
+}
+
+for _, blob := range result.Blobs {
+    fmt.Printf("Found blob: %s (%d bytes)\n", blob.PathName, blob.Size)
+}
+```
+
+### Upload a Blob (Put)
+
+```go
+file, _ := os.Open("photo.jpg")
+defile.Close()
+
+options := vercelblob.PutCommandOptions{
+    AddRandomSuffix: true,
+    ContentType:     "image/jpeg",
+}
+
+result, err := client.Put("uploads/photo.jpg", file, options)
+if err != nil {
+    log.Fatal(err)
+}
+
+fmt.Printf("Uploaded to: %s\n", result.URL)
+```
+
+### Copy a Blob
+
+```go
+result, err := client.Copy(
+    "https://your-store.public.blob.vercel-storage.com/old.txt",
+    "new-destination.txt",
+    vercelblob.PutCommandOptions{},
+)
+```
+
+### Download a Blob
+
+```go
+// Download entire file
+data, err := client.Download("uploads/photo.jpg", vercelblob.DownloadCommandOptions{})
+
+// Download a specific range
+rangeOptions := vercelblob.DownloadCommandOptions{
+    ByteRange: &vercelblob.Range{Start: 0, End: 1024},
+}
+partialData, err := client.Download("uploads/large-file.bin", rangeOptions)
+```
+
+### Delete a Blob
+
+```go
+err := client.Delete("https://your-store.public.blob.vercel-storage.com/file-to-delete.txt")
+```
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `BLOB_READ_WRITE_TOKEN` | Your Vercel Blob read/write token (required if no provider used). |
+| `VERCEL_BLOB_API_URL` | Override the default API endpoint (useful for testing). |
+| `VERCEL_BLOB_API_VERSION` | Override the default API version (default: `9`). |
+
+## License
+
+MIT
